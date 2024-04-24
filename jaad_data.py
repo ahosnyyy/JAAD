@@ -35,6 +35,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 """
+from operator import le
 import sys
 import pickle
 import cv2
@@ -46,6 +47,13 @@ from os.path import join, abspath, exists
 from os import listdir, makedirs
 from sklearn.model_selection import train_test_split, KFold
 
+import os
+
+frame_every = 1
+
+def get_frame_every(cap, num_sec=0.5):
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    return int(fps * num_sec)
 
 class JAAD(object):
     def __init__(self, data_path='', regen_pkl=False):
@@ -187,10 +195,19 @@ class JAAD(object):
             video_clip_path = join(self._clips_path, vid + '.mp4')
 
             save_images_path = join(self._images_path, vid)
+            part_path = join("./part-occlusion", vid)
+            full_path = join("./full-occlusion", vid)
             if not exists(save_images_path):
                 makedirs(save_images_path)
 
+            def check_file_existence(file_path):
+                return os.path.exists(file_path)
+
+            
             vidcap = cv2.VideoCapture(video_clip_path)
+
+            frame_every = get_frame_every(vidcap) #Hosny
+
             success, image = vidcap.read()
             frame_num = 0
             img_count = 0
@@ -198,14 +215,17 @@ class JAAD(object):
                 print('Failed to open the video {}'.format(vid))
             while success:
                 self.update_progress(img_count / num_frames)
-                img_count += 1
+                img_count += frame_every
                 img_path = join(save_images_path, "{:05d}.png".format(frame_num))
-                if not exists(img_path):
+                check_part_path = os.path.join(part_path, "{:05d}.txt".format(frame_num))
+                check_full_path = os.path.join(full_path, "{:05d}.txt".format(frame_num))
+                if (not exists(img_path)): #and (check_file_existence(check_part_path) or check_file_existence(check_full_path)):
                     cv2.imwrite(img_path, image)
                 #else:
                 #    print('path {} already exists'.format(img_path))
+                frame_num += frame_every
+                vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
                 success, image = vidcap.read()
-                frame_num += 1
             if num_frames != img_count:
                 print('num images don\'t match {}/{}'.format(num_frames, img_count))
             print('\n')
@@ -770,6 +790,19 @@ class JAAD(object):
         :param file_path: Where to save the script file
         :return: Pedestrian samples
         """
+        params = {'fstride': frame_every,
+                  'sample_type': 'all',  # 'beh'
+                  'subset': 'default',
+                  'height_rng': [0, float('inf')],
+                  'squarify_ratio': 0,
+                  'data_split_type': 'default',  # kfold, random, default
+                  'seq_type': 'intention',
+                  'min_track_size': 15,
+                  'random_params': {'ratios': None,
+                                    'val_data': True,
+                                    'regen_data': False},
+                  'kfold_params': {'num_folds': 5, 'fold': 1}}
+
         squarify_ratio = params['squarify_ratio']
         frame_stride = params['fstride']
         height_rng = params['height_rng']
@@ -806,6 +839,7 @@ class JAAD(object):
                     if imgs[i] not in ped_samples:
                         continue
                     bbox_height = abs(b[0] - b[2])
+                    bbox_width = abs(b[1] - b[3])
                     if height_rng[0] <= bbox_height <= height_rng[1]:
                         if (occlusion_type == None and occlusion[i] == 0) or \
                                 (occlusion_type == 'part' and occlusion[i] < 2) or \
@@ -823,6 +857,54 @@ class JAAD(object):
                             if pid not in unique_samples:
                                 unique_samples.append(pid)
                             total_sample_count += 1
+
+                        if (occlusion_type == 'part-only' and occlusion[i] == 1):
+                            if squarify_ratio:
+                                b = self._squarify(b, squarify_ratio, img_width)
+                            ped_samples[imgs[i]].append(
+                                                {'width': img_width,
+                                                'height': img_height,
+                                                'tag': pid,
+                                                'box': b,
+                                                'seg_area': (b[2] - b[0] + 1) * (b[3] - b[1] + 1),
+                                                'occlusion': occlusion[i],
+                                                'difficult': difficult})
+                            if pid not in unique_samples:
+                                unique_samples.append(pid)
+                            total_sample_count += 1
+
+                        if (occlusion_type == 'full-only' and occlusion[i] == 2):
+                            if squarify_ratio:
+                                b = self._squarify(b, squarify_ratio, img_width)
+                            ped_samples[imgs[i]].append(
+                                                {'width': img_width,
+                                                'height': img_height,
+                                                'tag': pid,
+                                                'box': b,
+                                                'seg_area': (b[2] - b[0] + 1) * (b[3] - b[1] + 1),
+                                                'occlusion': occlusion[i],
+                                                'difficult': difficult})
+                            if pid not in unique_samples:
+                                unique_samples.append(pid)
+                            total_sample_count += 1
+
+                        if (occlusion_type == 'un-full' and (occlusion[i] == 2 or occlusion[i] == 0)):
+                            if squarify_ratio:
+                                b = self._squarify(b, squarify_ratio, img_width)
+                            ped_samples[imgs[i]].append(
+                                                {'width': img_width,
+                                                'height': img_height,
+                                                'tag': pid,
+                                                'box': b,
+                                                'seg_area': (b[2] - b[0] + 1) * (b[3] - b[1] + 1),
+                                                'occlusion': occlusion[i],
+                                                'difficult': difficult})
+                            if pid not in unique_samples:
+                                unique_samples.append(pid)
+                            total_sample_count += 1
+
+            if method == 'yolo4':
+                self._generate_csv_data_yolo4(image_set, file_path, ped_samples, img_width, img_height, vid, bbox_width, bbox_height)
         print('Number of unique pedestrians %d ' % len(unique_samples))
         print('Number of samples %d ' % total_sample_count)
         if method == 'frcnn':
@@ -895,18 +977,53 @@ class JAAD(object):
         """
         class_name = 'pedestrian'
         all_imgs = {}
-        data_save_path = file_path + 'yolo3_' + image_set + '.txt'
+        data_save_path = file_path + 'yolo3_vis_' + image_set + '.txt'
         with open(data_save_path, "wt") as f:
             for img, samples in sorted(ped_samples.items()):
                 if not samples:
                     continue
                 f.write('%s ' % (img))
+                """
                 for s in samples:
                     box = s['box']
                     f.write('%.0f,%.0f,%.0f,%.0f,%.0f ' % (box[0], box[1], box[2], box[3], 0))
+                """
                 f.write('\n')
             print('Data generated for YOLO3')
         map_path = file_path + 'mapping_yolo3'
+        with open(map_path, "wt") as f:
+            f.write('%s,0\n' % (class_name))
+        return data_save_path, map_path
+
+    def _generate_csv_data_yolo4(self, image_set, file_path, ped_samples, img_width, img_height, vid, bbox_width, bbox_height):
+        """
+        Data generation for YOLO4 algorithm
+        :param image_set: Data split
+        :param file_path: Path to save the data
+        :param ped_samples: Dictionary of all samples
+        """
+        class_name = 'pedestrian'
+        all_imgs = {}
+        folder_path = os.path.join(file_path, vid)
+        os.makedirs(folder_path, exist_ok=True)
+        for img, samples in sorted(ped_samples.items()):
+                if not samples:
+                    continue
+                #f.write('%s ' % (img))
+                file_name = ('%s ' % (img))[20:-5] + '.txt'
+                data_save_path = os.path.join(folder_path, file_name)
+                with open(data_save_path, "wt") as f:
+                    ii = 0
+                    for s in samples:
+                        box = s['box']
+                        box_h = box[3] - box[1]
+                        box_w = box[2] - box[0]
+                        f.write('%.0f %.6f %.6f %.6f %.6f' % (0, (box[0] + (box_w/2.0))/img_width, (box[1] + (box_h/2.0))/img_height, box_w/img_width, box_h/img_height))
+                        if ii < len(samples) -1 :
+                            f.write('\n')
+                        ii += 1
+        print('Data generated for YOLO4')
+        map_path = file_path + 'mapping_yolo4'
         with open(map_path, "wt") as f:
             f.write('%s,0\n' % (class_name))
         return data_save_path, map_path
